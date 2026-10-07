@@ -87,3 +87,37 @@ still found these, and Haiku agents fixed them:
   wrote a test that a faster game would make flaky, and some fixes stopped at "what was asked"
   rather than the obvious neighbouring case.
 - **Short prompts were enough** once the contract existed. Most fix rounds were around 15 lines.
+
+## Round 2: sectors, bosses and a bigger arena
+
+After beating v1 (wave 54, level 61, every upgrade maxed), Ben asked for more systems spread across
+different maps, with beating them unlocking things, plus more time to react to incoming rocks.
+The coordinator turned that into a v2 contract (the current `BRIEF.md`). Its most important part
+is one shared **game object and `game.api`** (damage, spawn, hurt, gems, effects). Every new module
+codes against it, so no module needs to import `game.js`.
+
+**Seven Haiku 5.5 agents built it.** Six ran in parallel, each owning its own files:
+progression (`upgrades.js`, `sectors.js`), hazards and bosses (`systems.js`, `bosses.js`), weapons
+(`weapons.js`), world and radar (`entities.js`, `overlay.js`), interface and audio (`index.html`,
+`style.css`, `ui.js`, `audio.js`), and both test tools. The seventh then rewrote `game.js` against
+the real exports. Each module agent tested its code with a fake game object built from the contract
+before anything else existed. Integration then passed the 12-step smoke test on its first full run.
+
+**What review caught this time:**
+- **Performance.** All the new glow put the busiest scenes at 5–19 FPS in headless Chromium. The
+  integration agent profiled it properly: about 97% of frame time went to rasterising `shadowBlur`,
+  and with glow switched off the same scene ran at 59 FPS. A five-agent fix round set a glow budget
+  of a handful of shadowed draws per frame, with fake glow from wide low-alpha strokes everywhere
+  else. Every sector, boss and evolution scene now runs at 54–60 FPS headless, even with the
+  machine heavily loaded by other work.
+- **Bosses arrived too slowly.** They spawned in the far corner and crawled in. They now spawn just
+  off-screen and fly in.
+- **Pacing in the bigger arena.** Waves spawned heading for the arena centre and wandered. Rocks now
+  aim at the ship, and stardust homes in once it is a few seconds old.
+- **Layout.** The star map's route line crossed the card text, and the sector intro collided with
+  the "WAVE 1" banner.
+- **Small fixes.** Frost Shards could chain off boss shards. `?unlockall=1` (a test flag) would have
+  been saved into real progress.
+
+v2 is about 7,600 lines across 13 game modules and the two tools. Every agent transcript was
+checked for the served model, and all of them were `claude-haiku-5-5`.

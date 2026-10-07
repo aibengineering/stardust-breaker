@@ -5,6 +5,8 @@ const SHOT_MIN_GAP = 1 / 12;
 const PICKUP_MIN_GAP = 0.045;
 const PICKUP_STREAK_RESET = 0.4;
 const PICKUP_STREAK_MAX = 12;
+const BOSS_HIT_MIN_GAP = 1 / 10;
+const LIGHTNING_MIN_GAP = 1 / 6;
 
 let ctx = null;
 let bus = null;
@@ -13,6 +15,8 @@ let muted = readStoredMuted();
 let lastShotAt = -10;
 let lastPickupAt = -10;
 let pickupStreak = 0;
+let lastBossHitAt = -10;
+let lastLightningAt = -10;
 
 function readStoredMuted() {
   try {
@@ -189,5 +193,76 @@ export const sfx = {
     tone(392, 0, 0.3, 'triangle', 0.14);
     tone(330, 0.22, 0.3, 'triangle', 0.14);
     tone(262, 0.44, 0.5, 'triangle', 0.14);
+  }),
+
+  // deep rising rumble with a low horn
+  bossSpawn: safe(() => {
+    noise(0, 1.8, 0.16, 'lowpass', 90, 420, 0.9);
+    tone(146.83, 0.2, 1.4, 'triangle', 0.07, 164.81);
+    tone(220, 0.2, 1.4, 'sine', 0.05, 246.94);
+  }),
+
+  // dull metallic clank, rate-limited
+  bossHit: safe(() => {
+    const t = ctx.currentTime;
+    if (t - lastBossHitAt < BOSS_HIT_MIN_GAP) return;
+    lastBossHitAt = t;
+    tone(240, 0, 0.09, 'triangle', 0.07, 150);
+    noise(0, 0.04, 0.05, 'bandpass', 900, 500, 2);
+  }),
+
+  // long explosion with a sparkle tail
+  bossDie: safe(() => {
+    noise(0, 1.2, 0.22, 'lowpass', 2200, 120);
+    tone(180, 0, 0.9, 'sine', 0.2, 40);
+    tone(1046.5, 0.25, 0.5, 'sine', 0.06);
+    tone(1568, 0.4, 0.5, 'sine', 0.05);
+    tone(2093, 0.55, 0.6, 'triangle', 0.035);
+  }),
+
+  // short bright fanfare, five rising notes
+  victory: safe(() => {
+    tone(523.25, 0, 0.18, 'triangle', 0.11);
+    tone(783.99, 0.12, 0.18, 'triangle', 0.11);
+    tone(1046.5, 0.24, 0.18, 'triangle', 0.11);
+    tone(1318.5, 0.36, 0.18, 'triangle', 0.11);
+    tone(1567.98, 0.5, 0.6, 'triangle', 0.12);
+    tone(1046.5, 0.5, 0.6, 'sine', 0.04);
+  }),
+
+  // electric crack with a short thump, rate-limited
+  lightning: safe(() => {
+    const t = ctx.currentTime;
+    if (t - lastLightningAt < LIGHTNING_MIN_GAP) return;
+    lastLightningAt = t;
+    noise(0, 0.12, 0.18, 'highpass', 2600, 900, 1.0);
+    tone(110, 0, 0.12, 'sine', 0.1, 50);
+  }),
+
+  // two soft beeps
+  warning: safe(() => {
+    tone(660, 0, 0.12, 'sine', 0.08);
+    tone(660, 0.22, 0.12, 'sine', 0.08);
+  }),
+
+  // shimmering rising arpeggio
+  evolve: safe(() => {
+    const notes = [523.25, 659.25, 783.99, 987.77, 1318.5, 1567.98];
+    notes.forEach((f, i) => {
+      tone(f, i * 0.07, 0.35, 'sine', 0.09);
+      tone(f * 2, i * 0.07 + 0.02, 0.25, 'triangle', 0.02);
+    });
+    noise(0.1, 0.5, 0.04, 'bandpass', 3000, 6000, 2);
+  }),
+
+  // quick whoosh
+  reroll: safe(() => {
+    noise(0, 0.3, 0.1, 'bandpass', 400, 2400, 1.5);
+  }),
+
+  // low growl
+  enrage: safe(() => {
+    tone(90, 0, 0.7, 'triangle', 0.09, 55);
+    noise(0, 0.6, 0.12, 'lowpass', 300, 120, 1.2);
   }),
 };

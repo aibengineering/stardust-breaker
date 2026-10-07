@@ -16,6 +16,7 @@
     <div id="hud-xp"><div id="hud-xp-fill"></div></div>
     <div class="hud-row">
       <div class="hud-left">
+        <span id="hud-sector" class="hud-sector"></span>
         <span id="hud-score">0</span>
         <span class="hud-meta"><span id="hud-wave">WAVE 1</span> · <span id="hud-level">LV 1</span></span>
       </div>
@@ -27,6 +28,16 @@
         <button id="mute-btn" class="hud-btn" type="button" aria-label="Mute" aria-pressed="false">🔊</button>
       </div>
     </div>
+  </div>
+
+  <div id="boss-bar" class="boss-bar" hidden>
+    <span id="boss-name" class="boss-name"></span>
+    <div id="boss-hp" class="boss-hp"><div id="boss-hp-fill" class="boss-hp-fill"></div></div>
+  </div>
+
+  <div id="sector-intro" class="sector-intro" hidden>
+    <span id="sector-intro-name" class="si-name"></span>
+    <span id="sector-intro-tag" class="si-tag"></span>
   </div>
 
   <div id="banner" aria-live="polite"></div>
@@ -46,6 +57,10 @@
   <section id="upgrade-screen" class="overlay" hidden>
     <div class="panel upgrade-panel">
       <h2 class="heading">LEVEL UP — choose one</h2>
+      <div id="upgrade-meta" class="upgrade-meta">
+        <span id="upgrade-slots" class="upgrade-slots">UPGRADES 0/6</span>
+        <button id="reroll-btn" class="reroll-btn" type="button">⟳ REROLL (0)</button>
+      </div>
       <div id="upgrade-cards" class="upgrade-cards"></div>
     </div>
   </section>
@@ -65,6 +80,30 @@
       <div class="section-label">UPGRADES</div>
       <div id="gameover-upgrades" class="chips"></div>
       <button id="restart-btn" class="btn btn-primary" type="button">PLAY AGAIN</button>
+      <button id="gameover-map-btn" class="btn btn-ghost" type="button">STAR MAP</button>
+    </div>
+  </section>
+
+  <section id="victory-screen" class="overlay" hidden>
+    <div class="panel victory-panel">
+      <div class="victory-kicker">✦ SECTOR CLEARED ✦</div>
+      <h2 class="heading heading-gold">SECTOR CLEARED</h2>
+      <div id="victory-stats" class="stats"></div>
+      <div class="section-label">UNLOCKED</div>
+      <div id="victory-unlocks" class="chips"></div>
+      <button id="continue-btn" class="btn btn-primary" type="button">KEEP GOING (ENDLESS)</button>
+      <button id="victory-map-btn" class="btn btn-ghost" type="button">STAR MAP</button>
+    </div>
+  </section>
+
+  <section id="map-screen" class="overlay map-overlay" hidden>
+    <div class="map-wrap">
+      <div class="map-head">
+        <button id="map-back-btn" class="btn-back" type="button">‹ BACK</button>
+        <h2 class="heading">STAR MAP</h2>
+        <span class="map-head-spacer" aria-hidden="true"></span>
+      </div>
+      <div id="map-sectors" class="map-sectors"></div>
     </div>
   </section>
 

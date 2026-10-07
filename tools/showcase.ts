@@ -1,18 +1,23 @@
-// Headless-Chromium weapon showcase + balance probe for Stardust Breaker. Needs the server running (bun server.ts).
+// Headless-Chromium showcase + balance probe for Stardust Breaker v2. Needs the server running.
 //
 //   bun tools/showcase.ts       BASE env: default http://127.0.0.1:8780, CHROME_PATH overrides the binary
+//                               BALANCE_RUNS env: number of bot runs in the balance probe (default 1)
 //
-// Part 1: one fresh run per loadout (invincible, upgrades granted via debug.grant), saves
-//         tools/out/showcase-*.png, asserts no console errors, prints FPS (FAIL below 20).
-// Part 2: balance probe, non-invincible runs (idle, then two bot runs). Informational only, except that
-//         a console error during a run is a FAIL.
-// Exit 1 on console/page errors, a missing expected element/state, or FPS < 20.
+// Every run is a fresh phone context (390x844) on BASE/?unlockall=1 with a clean localStorage.
+//   (a) sectors: for each of the 6 sectors, a sector scene (sector-<id>.png) and a boss scene after skipToBoss
+//       (boss-<id>.png). Each scene prints its FPS (rAF count over 2 s, measured while the stick is held); FAIL < 20.
+//   (b) evolutions: in the belt, grant the base upgrade to max + its partner at 1 + the evolution, then 3 s
+//       (evo-<id>.png). Asserts the evolution's stats flag is set.
+//   (c) balance probe (informational): a bot plays the belt, not invincible, for up to 180 s. It reports the time
+//       to the first boss, and whether it won (victory) or died. A console error or a bot that cannot act is a FAIL.
+// Saves tools/out/*.png. Prints PASS/FAIL per step. Exit 1 on any FAIL or console/page error.
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const base = (process.env.BASE ?? 'http://127.0.0.1:8780').replace(/\/$/, '');
+const BALANCE_RUNS = Number(process.env.BALANCE_RUNS ?? 1);
 const outDir = join(import.meta.dir, 'out');
 mkdirSync(outDir, { recursive: true });
 
@@ -59,7 +64,7 @@ function chromePath(): string {
   return found;
 }
 
-// Evaluated in the page; a string so the same predicate works for evaluate and waitForFunction.
+// Visible = in the DOM, no `hidden` attribute, non-zero box. A string so it works for evaluate and waitForFunction.
 const visibleExpr = (sel: string) => `(() => {
   const el = document.querySelector(${JSON.stringify(sel)});
   if (!el || el.hidden) return false;
@@ -80,19 +85,41 @@ async function expectState(page: Page, want: string, timeout = 5000) {
   });
 }
 
+async function text(page: Page, sel: string): Promise<string> {
+  return (await page.evaluate((s: string) => document.querySelector(s)?.textContent ?? '', sel)).replace(/\s+/g, ' ').trim();
+}
+
+// A natural XP level-up can open the upgrade screen at any moment, and the debug hooks only act in state 'playing'.
+// Pick the first card to close it; cards ignore taps for 250 ms after opening, so wait 300 ms first.
+async function settlePlaying(page: Page) {
+  for (let i = 0; i < 5; i++) {
+    if (!(await page.evaluate(visibleExpr('#upgrade-screen')))) break;
+    await page.waitForTimeout(300);
+    await page.locator('.upgrade-card').first().click({ timeout: 3000 });
+  }
+  await expectState(page, 'playing', 3000);
+}
+
 async function loadGame(page: Page) {
-  await page.goto(`${base}/`, { waitUntil: 'load', timeout: 15000 });
+  await page.goto(`${base}/?unlockall=1`, { waitUntil: 'load', timeout: 15000 });
   await page.waitForFunction(() => !!(window as any).__game, null, { timeout: 10000 }).catch(() => {
     throw new Error('window.__game never appeared (module error? see console errors)');
   });
 }
 
-// Fresh run: reload, press PLAY. invincible is reset by start(), so callers set it afterwards.
-async function startRun(page: Page) {
+// Fresh page on ?unlockall=1, debug.startSector(id), invincible, and xp pinned at 0 so that no level-up opens
+// the upgrade screen over a scene. Invincibility is set after the start, because start resets it.
+async function startSectorRun(page: Page, id: string) {
   await loadGame(page);
-  await page.click('#start-btn', { timeout: 3000 });
+  await page.evaluate((s: string) => (window as any).__game.debug.startSector(s), id);
   await expectState(page, 'playing');
   await expectVisible(page, '#hud');
+  await settlePlaying(page);
+  await page.evaluate(() => {
+    const g = (window as any).__game;
+    g.debug.setInvincible(true);
+    (window as any).__showcaseXpPin = setInterval(() => { if (g.state === 'playing') g.xp = 0; }, 4);
+  });
 }
 
 const shot = (page: Page, name: string) => page.screenshot({ path: join(outDir, `${name}.png`) });
@@ -111,37 +138,26 @@ async function phoneContext(browser: Browser) {
   return { ctx, page };
 }
 
-// Joystick: pointer goes down here; knob offsets from here are the stick (RANGE 60 px in input.js).
+// Joystick: pointer goes down here; the knob offset from here is the stick (RANGE 60 px in input.js).
 const ORIGIN = { x: 195, y: 640 };
 
-// Upgrade ids and maxLevel, copied from site/js/upgrades.js.
-const ALL_AT_MAX: [string, number][] = [
-  ['rapid', 5], ['damage', 5], ['velocity', 4], ['engine', 4], ['magnet', 4], ['hull', 4],
-  ['multishot', 4], ['pierce', 3], ['rear', 2], ['shield', 3], ['greed', 3],
-  ['orbit', 4], ['missiles', 4], ['nova', 3],
-];
+// Gentle circle on the stick (30 px knob radius) for about `ms`: the ship turns and drifts. Always releases.
+async function gentleStick(page: Page, ms: number) {
+  const steps = Math.max(1, Math.round(ms / 100));
+  await page.mouse.move(ORIGIN.x, ORIGIN.y);
+  await page.mouse.down();
+  try {
+    for (let i = 0; i <= steps; i++) {
+      const a = (i / 30) * Math.PI * 1.6;
+      await page.mouse.move(ORIGIN.x + 30 * Math.cos(a), ORIGIN.y + 30 * Math.sin(a));
+      await page.waitForTimeout(100);
+    }
+  } finally {
+    await page.mouse.up().catch(() => {});
+  }
+}
 
-type Loadout = {
-  key: string;
-  title: string;
-  grants: [string, number][];
-  wait?: 'missiles' | 'nova';
-  shieldCheck?: boolean;
-};
-
-const LOADOUTS: Loadout[] = [
-  { key: 'orbit', title: 'a) orbit x4', grants: [['orbit', 4]] },
-  { key: 'missiles', title: 'b) missiles x4', grants: [['missiles', 4]], wait: 'missiles' },
-  { key: 'nova', title: 'c) nova x3', grants: [['nova', 3]], wait: 'nova' },
-  {
-    key: 'guns', title: 'd) multishot x4, rear x2, rapid x5, pierce x3',
-    grants: [['multishot', 4], ['rear', 2], ['rapid', 5], ['pierce', 3]],
-  },
-  { key: 'shield', title: 'e) shield x3, hull x4', grants: [['shield', 3], ['hull', 4]], shieldCheck: true },
-  { key: 'everything', title: 'f) every upgrade at maxLevel', grants: ALL_AT_MAX, shieldCheck: true },
-];
-
-// Frames over 2 s, measured inside the page with requestAnimationFrame.
+// Frames over 2 s, measured inside the page with requestAnimationFrame. Start it, then move the stick while it runs.
 const FPS_EXPR = `new Promise(res => {
   let n = 0;
   const t0 = performance.now();
@@ -154,109 +170,142 @@ const FPS_EXPR = `new Promise(res => {
   requestAnimationFrame(f);
 })`;
 
-async function runLoadout(page: Page, lo: Loadout): Promise<string> {
-  await startRun(page);
-
-  const hooks = await page.evaluate(() => {
-    const d = (window as any).__game?.debug;
-    return typeof d?.grant === 'function' && typeof d?.setInvincible === 'function';
-  });
-  check(hooks, 'window.__game.debug.grant / setInvincible missing');
-
-  await page.evaluate((grants: [string, number][]) => {
-    const g = (window as any).__game;
-    g.debug.setInvincible(true);
-    for (const [id, n] of grants) g.debug.grant(id, n);
-    // A level-up would open the upgrade screen over the showcase, adding cards nobody asked for.
-    // Pin xp at 0 so only the granted loadout is on screen (gems never reach the 10 xp needed).
-    (window as any).__showcaseXpPin = setInterval(() => { if (g.state === 'playing') g.xp = 0; }, 4);
-  }, lo.grants);
-
-  const levels = await page.evaluate(() => ({ ...(window as any).__game.levels }));
-  for (const [id, n] of lo.grants) {
-    check(levels[id] === n, `grant ${id} x${n} not applied (levels.${id} = ${levels[id] ?? 0})`);
-  }
-
-  let note = '';
-  try {
-    // Gentle joystick drag: a 30 px knob circle over ~3 s, so the ship turns and drifts.
-    await page.mouse.move(ORIGIN.x, ORIGIN.y);
-    await page.mouse.down();
-    for (let i = 0; i <= 30; i++) {
-      const a = (i / 30) * Math.PI * 1.6;
-      await page.mouse.move(ORIGIN.x + 30 * Math.cos(a), ORIGIN.y + 30 * Math.sin(a));
-      await page.waitForTimeout(100);
-    }
-
-    if (lo.wait === 'missiles') {
-      await page.waitForFunction(() => ((window as any).__game.missiles?.length ?? 0) > 0, null, { timeout: 6000 })
-        .catch(() => { throw new Error('no missile in flight within 6 s'); });
-    }
-    if (lo.wait === 'nova') {
-      await page.waitForFunction(
-        () => (window as any).__game.particles.some((p: any) => p.type === 'ring' && p.maxR >= 140),
-        null,
-        { timeout: 10000 },
-      ).catch(() => { throw new Error('no nova ring (maxR >= 140) within 10 s'); });
-    }
-
-    if (lo.shieldCheck) {
-      const s = await page.evaluate(() => {
-        const g = (window as any).__game;
-        return { shield: g.ship.shield, maxHull: g.stats.maxHull, hull: g.ship.hull };
-      });
-      check(s.shield === 3, `ship.shield is ${s.shield}, expected 3`);
-      check(s.maxHull === 7, `stats.maxHull is ${s.maxHull}, expected 7`);
-      await page.waitForTimeout(150); // HUD refreshes once per frame
-      const pips = await page.evaluate(() => {
-        const q = (sel: string) => document.querySelectorAll(sel).length;
-        return {
-          hull: q('#hud-hull .pip.hull'), hullOn: q('#hud-hull .pip.hull.on'),
-          shield: q('#hud-hull .pip.shield'), shieldOn: q('#hud-hull .pip.shield.on'),
-        };
-      });
-      check(pips.hull === 7 && pips.shield === 3, `HUD pips: ${pips.hull} hull / ${pips.shield} shield, expected 7 / 3`);
-      check(pips.shieldOn === 3, `HUD shows ${pips.shieldOn} shield pips lit, expected 3`);
-      check(pips.hullOn === 7, `HUD shows ${pips.hullOn} hull pips lit, expected 7`);
-    }
-
-    check(!(await page.evaluate(visibleExpr('#upgrade-screen'))), 'upgrade screen opened during the showcase');
-    await shot(page, `showcase-${lo.key}`);
-
-    const fps = await page.evaluate(FPS_EXPR) as number;
-    note = `${fps.toFixed(1)} fps (headless, indicative)`;
-    check(fps >= 20, `FPS ${fps.toFixed(1)} < 20`);
-  } finally {
-    await page.mouse.up().catch(() => {});
-    await page.evaluate(() => clearInterval((window as any).__showcaseXpPin)).catch(() => {});
-  }
-  return note;
+// Runs the stick for `ms` while measuring FPS over the first 2 s of it.
+async function scene(page: Page, ms: number): Promise<number> {
+  const fpsP = page.evaluate(FPS_EXPR) as Promise<number>;
+  await gentleStick(page, ms);
+  const fps = await fpsP;
+  check(fps >= 20, `FPS ${fps.toFixed(1)} < 20`);
+  return fps;
 }
 
-async function runShowcase(browser: Browser) {
+// --- (a) sectors ---
+
+type Sector = { id: string; name: string; boss: string[] };
+
+const SECTORS: Sector[] = [
+  { id: 'belt', name: 'Asteroid Belt', boss: ['mother'] },
+  { id: 'storm', name: 'Ion Storm', boss: ['stormeye'] },
+  { id: 'gravity', name: 'Gravity Well', boss: ['horizon'] },
+  { id: 'ice', name: 'Ice Field', boss: ['glacier'] },
+  { id: 'ember', name: 'Ember Nebula', boss: ['phoenix'] },
+  // deep: the boss after skipToBoss is the first of the rotation
+  { id: 'deep', name: 'The Deep', boss: ['mother', 'stormeye', 'horizon', 'glacier', 'phoenix'] },
+];
+
+async function sectorScene(page: Page, sec: Sector): Promise<string> {
+  await startSectorRun(page, sec.id);
+  const hud = await text(page, '#hud-sector');
+  check(hud.includes(sec.name), `#hud-sector says "${hud}", expected "${sec.name}"`);
+  const fps = await scene(page, 4000);
+  await shot(page, `sector-${sec.id}`);
+  return `${fps.toFixed(1)} fps (headless, indicative)`;
+}
+
+// The boss spawns away from the ship; it may need a few seconds to drift or fly into the view.
+const BOSS_ON_SCREEN = () => {
+  const g = (window as any).__game;
+  const b = (g.bosses ?? []).find((x: any) => !x.dead);
+  if (!b) return false;
+  const sx = (b.x - g.cam.x) * g.zoom;
+  const sy = (b.y - g.cam.y) * g.zoom;
+  return sx > 0 && sx < g.view.w && sy > 0 && sy < g.view.h;
+};
+
+async function bossScene(page: Page, sec: Sector): Promise<string> {
+  await settlePlaying(page);
+  await page.evaluate(() => (window as any).__game.debug.skipToBoss());
+  await expectVisible(page, '#boss-bar', 6000);
+  await page.waitForFunction(() => (window as any).__game.bosses?.length === 1, null, { timeout: 6000 }).catch(async () => {
+    const now = await page.evaluate(() => (window as any).__game.bosses?.length);
+    throw new Error(`bosses.length is ${now}, expected 1`);
+  });
+  const type = await page.evaluate(() => (window as any).__game.bosses[0].type as string);
+  check(sec.boss.includes(type), `boss type "${type}", expected ${sec.boss.join(' / ')}`);
+  const onScreen = await page.waitForFunction(BOSS_ON_SCREEN, null, { timeout: 8000 }).then(() => true, () => false);
+  const fps = await scene(page, 4000);
+  await shot(page, `boss-${sec.id}`);
+  return `${fps.toFixed(1)} fps (headless, indicative), boss ${type}${onScreen ? '' : ', NOT on screen after 8 s'}`;
+}
+
+async function sectorRun(browser: Browser, sec: Sector) {
   const { ctx, page } = await phoneContext(browser);
   try {
-    for (const lo of LOADOUTS) {
-      await step(`showcase ${lo.key}: ${lo.title}`, () => runLoadout(page, lo));
-    }
+    await step(`sector ${sec.id}: ${sec.name}`, () => sectorScene(page, sec));
+    await step(`boss ${sec.id}: after skipToBoss`, () => bossScene(page, sec));
+    await page.evaluate(() => clearInterval((window as any).__showcaseXpPin)).catch(() => {});
   } finally {
     await ctx.close();
   }
 }
 
-// --- balance probe ---
+// --- (b) evolutions ---
+
+// Evolution -> [base upgrade granted to its max, partner granted at 1, stats flag]. Each evolution requires
+// requires: [base, partner] in upgrades.js. Max levels are the upgrade table's max values.
+type Evo = { id: string; name: string; base: [string, number]; partner: string; flag: string };
+
+const EVOLUTIONS: Evo[] = [
+  { id: 'prism', name: 'Prism Lance', base: ['multishot', 4], partner: 'pierce', flag: 'evoPrism' },
+  { id: 'railstorm', name: 'Railstorm', base: ['rapid', 5], partner: 'damage', flag: 'evoRail' },
+  { id: 'tempest', name: 'Tempest', base: ['chain', 4], partner: 'velocity', flag: 'evoTempest' },
+  { id: 'swarm', name: 'Cluster Swarm', base: ['missiles', 4], partner: 'nova', flag: 'evoCluster' },
+  { id: 'singularity', name: 'Singularity Blades', base: ['orbit', 4], partner: 'magnet', flag: 'evoSingularity' },
+  { id: 'blackstar', name: 'Black Star', base: ['gravbomb', 3], partner: 'nova', flag: 'evoBlackstar' },
+  { id: 'aegis', name: 'Aegis Core', base: ['shield', 3], partner: 'hull', flag: 'evoAegis' },
+  { id: 'hivemind', name: 'Hivemind', base: ['drone', 3], partner: 'missiles', flag: 'evoHive' },
+];
+
+async function evoScene(page: Page, evo: Evo): Promise<string> {
+  await startSectorRun(page, 'belt');
+  const [baseId, baseMax] = evo.base;
+  await settlePlaying(page);
+  await page.evaluate(([b, bMax, p, e]: [string, number, string, string]) => {
+    const g = (window as any).__game;
+    g.debug.grant(b, bMax);
+    g.debug.grant(p, 1);
+    g.debug.grant(e, 1);
+  }, [baseId, baseMax, evo.partner, evo.id] as [string, number, string, string]);
+
+  const got = await page.evaluate(([b, p, e, flag]: [string, string, string, string]) => {
+    const g = (window as any).__game;
+    return { base: g.levels[b] ?? 0, partner: g.levels[p] ?? 0, evo: g.levels[e] ?? 0, flag: g.stats[flag] === true };
+  }, [baseId, evo.partner, evo.id, evo.flag] as [string, string, string, string]);
+  check(got.base === baseMax, `${baseId} is level ${got.base}, expected ${baseMax}`);
+  check(got.partner === 1, `${evo.partner} is level ${got.partner}, expected 1`);
+  check(got.evo === 1, `${evo.id} is level ${got.evo}, expected 1`);
+  check(got.flag, `stats.${evo.flag} is not true after granting ${evo.id}`);
+
+  const fps = await scene(page, 3000);
+  await shot(page, `evo-${evo.id}`);
+  return `${evo.name}, ${fps.toFixed(1)} fps (headless, indicative)`;
+}
+
+async function evoRun(browser: Browser, evo: Evo) {
+  const { ctx, page } = await phoneContext(browser);
+  try {
+    await step(`evo ${evo.id}: ${evo.name}`, () => evoScene(page, evo));
+    await page.evaluate(() => clearInterval((window as any).__showcaseXpPin)).catch(() => {});
+  } finally {
+    await ctx.close();
+  }
+}
+
+// --- (c) balance probe ---
 
 type Snap = {
   state: string;
   wave: number;
   level: number;
   score: number;
+  phase: string;
   maxHull: number;
-  levels: Record<string, number>;
-  ship: { x: number; y: number; angle: number; alive: boolean; hull: number } | null;
-  world: { w: number; h: number };
-  asteroids: { x: number; y: number; r: number }[];
+  ship: { x: number; y: number; alive: boolean; hull: number } | null;
+  targets: { x: number; y: number; r: number }[];
+  bossCount: number;
   upgradeOpen: boolean;
+  evoCards: number;
+  levels: Record<string, number>;
 };
 
 async function snap(page: Page): Promise<Snap> {
@@ -268,58 +317,63 @@ async function snap(page: Page): Promise<Snap> {
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0;
     };
+    const live = (o: any) => !o.dead;
     const s = g.ship;
     return {
       state: g.state,
       wave: g.wave,
       level: g.level,
       score: g.score,
-      maxHull: g.stats.maxHull,
-      levels: { ...g.levels },
-      ship: s ? { x: s.x, y: s.y, angle: s.angle, alive: s.alive, hull: s.hull } : null,
-      world: { w: g.world.w, h: g.world.h },
-      asteroids: g.asteroids.filter((a: any) => !a.dead).map((a: any) => ({ x: a.x, y: a.y, r: a.radius })),
+      phase: g.phase,
+      maxHull: g.stats?.maxHull ?? 0,
+      ship: s ? { x: s.x, y: s.y, alive: !!s.alive, hull: s.hull } : null,
+      targets: [...(g.asteroids ?? []), ...(g.bosses ?? [])].filter(live)
+        .map((t: any) => ({ x: t.x, y: t.y, r: t.radius })),
+      bossCount: (g.bosses ?? []).filter(live).length,
       upgradeOpen: open('#upgrade-screen'),
+      evoCards: document.querySelectorAll('.upgrade-card.rarity-legendary').length,
+      levels: { ...g.levels },
     };
   });
 }
 
-// Shortest signed offset on a wrapping axis.
-const wrapD = (d: number, size: number) => ((((d + size / 2) % size) + size) % size) - size / 2;
-const SAFE_GAP = 120; // px of clear space the bot keeps from asteroid edges
-const FACE_MAG = 18; // stick px: turns toward target, below the 0.35 thrust threshold
-const FLEE_MAG = 50; // stick px: turns away and thrusts
+const KEEP_AWAY = 140; // px of clear space, edge to edge, the bot keeps from every target
+const CHASE_MAG = 45; // stick px (of 60): thrust toward the nearest target
+const FLEE_MAG = 55; // stick px: thrust away from the targets that are too close
 
-// Face the nearest asteroid; if any is closer than SAFE_GAP, thrust away from all of them.
-function steerTarget(s: NonNullable<Snap['ship']>, world: Snap['world'], asteroids: Snap['asteroids']) {
+// World coordinates, no wrap-around (the arena is bounded). Chase the nearest target while it is farther than
+// KEEP_AWAY; inside KEEP_AWAY, thrust away from every target that is too close.
+function steer(ship: NonNullable<Snap['ship']>, targets: Snap['targets']): { dir: number; mag: number } | null {
+  if (targets.length === 0) return null;
   let fx = 0;
   let fy = 0;
-  let nearest = Infinity;
-  let nd: [number, number] = [0, 0];
-  for (const a of asteroids) {
-    const dx = wrapD(a.x - s.x, world.w);
-    const dy = wrapD(a.y - s.y, world.h);
+  let bestGap = Infinity;
+  let best = { dx: 0, dy: 0 };
+  for (const t of targets) {
+    const dx = t.x - ship.x;
+    const dy = t.y - ship.y;
     const dist = Math.hypot(dx, dy) || 1;
-    const gap = dist - a.r;
-    if (gap < nearest) { nearest = gap; nd = [dx, dy]; }
-    if (gap < SAFE_GAP) {
-      const push = (SAFE_GAP - gap) / SAFE_GAP;
+    const gap = dist - t.r;
+    if (gap < bestGap) { bestGap = gap; best = { dx, dy }; }
+    if (gap < KEEP_AWAY) {
+      const push = (KEEP_AWAY - gap) / KEEP_AWAY;
       fx -= (dx / dist) * push;
       fy -= (dy / dist) * push;
     }
   }
-  if (nearest === Infinity) return { dir: s.angle, mag: 0 };
-  if (nearest < SAFE_GAP) return { dir: Math.atan2(fy, fx), mag: FLEE_MAG };
-  return { dir: Math.atan2(nd[1], nd[0]), mag: FACE_MAG };
+  if (bestGap < KEEP_AWAY) return { dir: Math.atan2(fy, fx), mag: FLEE_MAG };
+  return { dir: Math.atan2(best.dy, best.dx), mag: CHASE_MAG };
 }
 
-async function botTick(page: Page, s: Snap, st: { holding: boolean }) {
-  if (s.upgradeOpen) {
+type BotState = { holding: boolean };
+
+async function botTick(page: Page, s: Snap, st: BotState) {
+  if (s.upgradeOpen || s.state === 'upgrade') {
     if (st.holding) { await page.mouse.up(); st.holding = false; }
     await page.waitForTimeout(300); // cards ignore taps for 250 ms after they appear
-    if (await page.evaluate(visibleExpr('#upgrade-screen'))) {
-      await page.locator('.upgrade-card').first().click({ timeout: 2000 });
-    }
+    // An evolution card if one is offered, else the first card.
+    const pick = s.evoCards > 0 ? '.upgrade-card.rarity-legendary' : '.upgrade-card';
+    await page.locator(pick).first().click({ timeout: 2000 });
     return;
   }
   if (s.state !== 'playing' || !s.ship) return;
@@ -329,11 +383,15 @@ async function botTick(page: Page, s: Snap, st: { holding: boolean }) {
     await page.mouse.down();
     st.holding = true;
   }
-  const { dir, mag } = s.ship.alive ? steerTarget(s.ship, s.world, s.asteroids) : { dir: 0, mag: 0 };
+  const c = s.ship.alive ? steer(s.ship, s.targets) : null;
+  const dir = c?.dir ?? 0;
+  const mag = c?.mag ?? 0;
   await page.mouse.move(ORIGIN.x + mag * Math.cos(dir), ORIGIN.y + mag * Math.sin(dir));
 }
 
-type Row = { run: string; result: string; wave: number; level: number; score: number; hull: string; upgrades: string };
+type Row = { run: string; result: string; bossAt: string; wave: number; level: number; score: number; cards: number; hull: string; upgrades: string };
+
+const LIMIT = 180;
 
 const timelineLine = (t: number, s: Snap) =>
   `  t=${String(Math.round(t)).padStart(3)}s  ${s.state.padEnd(8)} alive=${s.ship?.alive ? 'yes' : 'no '}  ` +
@@ -342,44 +400,59 @@ const timelineLine = (t: number, s: Snap) =>
 const upgradesTaken = (levels: Record<string, number>) =>
   Object.entries(levels).filter(([, v]) => v > 0).map(([k, v]) => `${k} x${v}`).join(', ') || 'none';
 
-async function balanceRun(browser: Browser, kind: 'idle' | 'bot', n: number): Promise<Row> {
-  const label = `${kind} #${n}`;
+async function balanceRun(browser: Browser, n: number): Promise<Row> {
+  const label = `bot #${n}`;
   const { ctx, page } = await phoneContext(browser);
   const mark = errors.length;
-  const st = { holding: false };
+  const st: BotState = { holding: false };
   let last: Snap | null = null;
   let result = 'no result';
-  console.log(`\n== balance: ${label} (not invincible) ==`);
+  let bossAt: number | null = null;
+  let cards = 0;
+  let wasOpen = false;
+  console.log(`\n== balance: ${label} (belt, not invincible, up to ${LIMIT} s) ==`);
   try {
-    await startRun(page);
-    const limit = kind === 'idle' ? 60 : 120;
+    await loadGame(page);
+    await page.evaluate(() => (window as any).__game.debug.startSector('belt'));
+    await expectState(page, 'playing');
+    await expectVisible(page, '#hud');
     const t0 = Date.now();
     let nextReport = 10;
-    let deathLogged = false;
     for (;;) {
       const t = (Date.now() - t0) / 1000;
       const s = await snap(page);
       last = s;
+      if (s.upgradeOpen && !wasOpen) cards++;
+      wasOpen = s.upgradeOpen;
+      if (bossAt === null && s.bossCount > 0) {
+        bossAt = t;
+        console.log(`${timelineLine(t, s)}  <- boss on the field (${s.phase})`);
+      }
       if (t >= nextReport) {
         console.log(timelineLine(t, s));
         nextReport += 10;
       }
-      if (!deathLogged && s.ship && !s.ship.alive) {
-        deathLogged = true;
-        console.log(`${timelineLine(t, s)}  <- ship destroyed`);
+      if (s.state === 'victory') {
+        result = `VICTORY at ${t.toFixed(1)} s`;
+        console.log(`${timelineLine(t, s)}  <- victory`);
+        break;
       }
       if (s.state === 'over') {
-        result = `game over at ${t.toFixed(1)}s`;
+        result = `died at ${t.toFixed(1)} s`;
         console.log(`${timelineLine(t, s)}  <- game over`);
         break;
       }
-      if (t >= limit) {
-        result = `alive at ${limit}s (time limit)`;
+      if (t >= LIMIT) {
+        result = `alive at ${LIMIT} s (time limit)`;
         break;
       }
-      if (kind === 'bot') await botTick(page, s, st);
+      await botTick(page, s, st);
       await page.waitForTimeout(100);
     }
+  } catch (e) {
+    failed++;
+    result = `bot error: ${reason(e)}`;
+    console.log(`FAIL balance ${label}: ${reason(e)}`);
   } finally {
     await page.mouse.up().catch(() => {});
     await ctx.close();
@@ -389,13 +462,15 @@ async function balanceRun(browser: Browser, kind: 'idle' | 'bot', n: number): Pr
     failed++;
     console.log(`FAIL balance ${label}: console error: ${reason(fresh[0])}${fresh.length > 1 ? ` (+${fresh.length - 1} more)` : ''}`);
   }
-  const s = last!;
+  const s = last;
   return {
     run: label,
     result,
+    bossAt: bossAt === null ? 'never' : `${bossAt.toFixed(1)} s`,
     wave: s?.wave ?? 0,
     level: s?.level ?? 0,
     score: s?.score ?? 0,
+    cards,
     hull: s?.ship ? `${s.ship.hull}/${s.maxHull}` : '-',
     upgrades: upgradesTaken(s?.levels ?? {}),
   };
@@ -403,11 +478,9 @@ async function balanceRun(browser: Browser, kind: 'idle' | 'bot', n: number): Pr
 
 async function runBalance(browser: Browser) {
   const rows: Row[] = [];
-  for (const [kind, n] of [['idle', 1], ['bot', 1], ['bot', 2]] as const) {
-    rows.push(await balanceRun(browser, kind, n));
-  }
+  for (let n = 1; n <= BALANCE_RUNS; n++) rows.push(await balanceRun(browser, n));
   console.log('\nBALANCE SUMMARY (informational)');
-  const cols: (keyof Row)[] = ['run', 'result', 'wave', 'level', 'score', 'hull', 'upgrades'];
+  const cols: (keyof Row)[] = ['run', 'result', 'bossAt', 'wave', 'level', 'score', 'cards', 'hull', 'upgrades'];
   const width = (c: keyof Row) => Math.max(c.length, ...rows.map(r => String(r[c]).length));
   const fmtRow = (get: (c: keyof Row) => string) => cols.map(c => get(c).padEnd(width(c))).join('  ');
   console.log(fmtRow(c => c));
@@ -416,7 +489,8 @@ async function runBalance(browser: Browser) {
 }
 
 async function runAll(browser: Browser) {
-  await runShowcase(browser);
+  for (const sec of SECTORS) await sectorRun(browser, sec);
+  for (const evo of EVOLUTIONS) await evoRun(browser, evo);
   await runBalance(browser);
 }
 

@@ -9,8 +9,15 @@ initInput(canvas);
 const game = createGame({ canvas, ui, input, sfx });
 
 ui.initUI({
-  onStart: () => { sfx.unlock(); game.start(); },
-  onRestart: () => { sfx.unlock(); game.start(); },
+  onMapOpen: () => { sfx.unlock(); game.openMap(); },
+  onMapBack: () => game.toTitle(),
+  onSelectSector: (id) => { sfx.unlock(); game.selectSector(id); },
+  onStart: () => { sfx.unlock(); game.startRun('belt'); },
+  onRestart: () => { sfx.unlock(); game.retry(); },
+  onContinue: () => game.continueRun(),
+  onVictoryMap: () => game.openMap(),
+  onGameOverMap: () => game.openMap(),
+  onReroll: () => game.reroll(),
   onPause: () => game.pause(),
   onResume: () => game.resume(),
   onQuit: () => game.quitToTitle(),
