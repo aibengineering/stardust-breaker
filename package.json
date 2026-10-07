@@ -1,0 +1,9 @@
+{
+  "name": "asteroid-shooter",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun server.ts",
+    "smoke": "bun tools/smoke.ts"
+  }
+}

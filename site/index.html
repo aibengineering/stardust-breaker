@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#070b1a">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Stardust Breaker</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div id="hud" hidden>
+    <div id="hud-xp"><div id="hud-xp-fill"></div></div>
+    <div class="hud-row">
+      <div class="hud-left">
+        <span id="hud-score">0</span>
+        <span class="hud-meta"><span id="hud-wave">WAVE 1</span> · <span id="hud-level">LV 1</span></span>
+      </div>
+      <div class="hud-right">
+        <div id="hud-hull" class="hud-hull"></div>
+        <button id="pause-btn" class="hud-btn" type="button" aria-label="Pause">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+        </button>
+        <button id="mute-btn" class="hud-btn" type="button" aria-label="Mute" aria-pressed="false">🔊</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="banner" aria-live="polite"></div>
+
+  <section id="title-screen" class="overlay" hidden>
+    <div class="panel">
+      <h1 class="title"><span class="title-a">STARDUST</span><span class="title-b">BREAKER</span></h1>
+      <ul class="howto">
+        <li>Drag anywhere to steer · ship fires automatically · collect green stardust to level up</li>
+        <li>Desktop: arrows/WASD, P to pause</li>
+      </ul>
+      <div class="best">BEST <span id="title-best">0</span></div>
+      <button id="start-btn" class="btn btn-primary" type="button">PLAY</button>
+    </div>
+  </section>
+
+  <section id="upgrade-screen" class="overlay" hidden>
+    <div class="panel upgrade-panel">
+      <h2 class="heading">LEVEL UP — choose one</h2>
+      <div id="upgrade-cards" class="upgrade-cards"></div>
+    </div>
+  </section>
+
+  <section id="pause-screen" class="overlay" hidden>
+    <div class="panel">
+      <h2 class="heading">PAUSED</h2>
+      <button id="resume-btn" class="btn btn-primary" type="button">RESUME</button>
+      <button id="quit-btn" class="btn btn-ghost" type="button">QUIT TO TITLE</button>
+    </div>
+  </section>
+
+  <section id="gameover-screen" class="overlay" hidden>
+    <div class="panel">
+      <h2 class="heading heading-danger">GAME OVER</h2>
+      <div id="gameover-stats" class="stats"></div>
+      <div class="section-label">UPGRADES</div>
+      <div id="gameover-upgrades" class="chips"></div>
+      <button id="restart-btn" class="btn btn-primary" type="button">PLAY AGAIN</button>
+    </div>
+  </section>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

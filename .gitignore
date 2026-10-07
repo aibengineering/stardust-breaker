@@ -1,0 +1,7 @@
+# Local dependencies, tool output, and runtime artifacts
+node_modules
+tools/out/
+.agents/*.json
+.agents/*.err
+*.service
+.DS_Store
